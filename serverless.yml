@@ -1,0 +1,122 @@
+service: eda-demo
+
+frameworkVersion: '2'
+
+package:
+  individually: true
+  exclude:
+    - '**/**'
+
+provider:
+  name: aws
+  runtime: python3.9
+  region: eu-west-1
+  memorySize: 128
+  versionFunctions: false
+  deploymentBucket:
+    blockPublicAccess: true
+  tracing:
+    lambda: true
+  stage: ${opt:stage,'dev'}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:PutObject
+      Resource: !Join ["/" ,[ !GetAtt inputFileBucket.Arn,"*" ]]
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:PutObject
+      Resource: !Join ["/" ,[ !GetAtt outputFileBucket.Arn,"*" ]]
+    - Effect: Allow
+      Action:
+        - states:StartExecution
+      Resource: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${self:provider.stage}
+    - Effect: Allow
+      Action: execute-api:Invoke
+      Resource: '*'
+
+plugins:
+  - serverless-step-functions
+  - serverless-python-requirements
+
+functions:
+  file-upload:
+    handler: src/file_upload.handler
+    package:
+      include:
+        - src/file_upload.py
+    events:
+      - eventBridge: 
+          pattern:
+            source:
+              - aws.s3
+            detail-type:
+              - Object Created
+            detail:
+              bucket:
+                name:
+                  - !Ref inputFileBucket
+    environment:
+      STATE_MACHINE: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${self:provider.stage}
+
+  processor:
+    handler: src/processor.handler
+    package:
+      include:
+        - src/processor.py
+    environment:
+      API_KEY: ${ssm:/eda-demo/positionstack-key}
+
+  merger:
+    handler: src/merger.handler
+    package:
+      include:
+        - src/merger.py
+    environment:
+      OUTPUT_BUCKET: !Ref outputFileBucket
+
+stepFunctions:
+  stateMachines:
+    slsStep:
+      name: ${self:service}-${self:provider.stage}
+      tracingConfig:
+        enabled: true
+      definition:
+        Comment: "Serverless Step Function example for S3 file processing"
+        StartAt: iterator
+        States:
+          iterator:
+            Type: Map
+            ItemsPath: "$.payload"
+            ResultPath: "$.results"
+            Iterator:
+              StartAt: processor
+              States:
+                processor:
+                  Type: Task
+                  Resource: "arn:aws:lambda:${aws:region}:${aws:accountId}:function:${self:service}-${self:provider.stage}-processor"
+                  End: true
+            Next: merger
+          merger:
+            Type: Task
+            Resource: "arn:aws:lambda:${aws:region}:${aws:accountId}:function:${self:service}-${self:provider.stage}-merger"
+            End: true
+
+resources:
+  Resources:
+    inputFileBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-input-${self:provider.stage}
+        AccessControl: Private
+        NotificationConfiguration:
+          EventBridgeConfiguration:
+            EventBridgeEnabled: true
+
+    outputFileBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-output-${self:provider.stage}
+        AccessControl: Private
