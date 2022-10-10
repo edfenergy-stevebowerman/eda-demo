@@ -1,11 +1,11 @@
 service: eda-demo
 
-frameworkVersion: '2'
+frameworkVersion: '3'
 
 package:
   individually: true
-  exclude:
-    - '**/**'
+  patterns:
+    - '!**/**'
 
 provider:
   name: aws
@@ -18,24 +18,21 @@ provider:
   tracing:
     lambda: true
   stage: ${opt:stage,'dev'}
-  iamRoleStatements:
-    - Effect: Allow
-      Action:
-        - s3:GetObject
-        - s3:PutObject
-      Resource: !Join ["/" ,[ !GetAtt inputFileBucket.Arn,"*" ]]
-    - Effect: Allow
-      Action:
-        - s3:GetObject
-        - s3:PutObject
-      Resource: !Join ["/" ,[ !GetAtt outputFileBucket.Arn,"*" ]]
-    - Effect: Allow
-      Action:
-        - states:StartExecution
-      Resource: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${self:provider.stage}
-    - Effect: Allow
-      Action: execute-api:Invoke
-      Resource: '*'
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+          Resource: !Join ["/" ,[ !GetAtt inputFileBucket.Arn,"*" ]]
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+          Resource: !Join ["/" ,[ !GetAtt outputFileBucket.Arn,"*" ]]
+        - Effect: Allow
+          Action:
+            - states:StartExecution
+          Resource: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${self:provider.stage}
 
 plugins:
   - serverless-step-functions
@@ -45,7 +42,7 @@ functions:
   file-upload:
     handler: src/file_upload.handler
     package:
-      include:
+      patterns:
         - src/file_upload.py
     events:
       - eventBridge: 
@@ -64,7 +61,7 @@ functions:
   processor:
     handler: src/processor.handler
     package:
-      include:
+      patterns:
         - src/processor.py
     environment:
       API_KEY: ${ssm:/eda-demo/positionstack-key}
@@ -72,7 +69,7 @@ functions:
   merger:
     handler: src/merger.handler
     package:
-      include:
+      patterns:
         - src/merger.py
     environment:
       OUTPUT_BUCKET: !Ref outputFileBucket

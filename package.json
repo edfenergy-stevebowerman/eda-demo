@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "create": "sls deploy",
+    "create": "npm install --legacy-peer-deps && sls deploy",
     "destroy": "aws s3 rm  s3://eda-demo-input-dev --recursive && aws s3 rm  s3://eda-demo-output-dev --recursive && sls remove",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -12,6 +12,6 @@
   "license": "ISC",
   "dependencies": {
     "serverless-python-requirements": "^5.4.0",
-    "serverless-step-functions": "^3.8.0"
+    "serverless-step-functions": "^3.10.0"
   }
 }
