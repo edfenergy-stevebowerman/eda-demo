@@ -1,5 +1,7 @@
 # AWS Event Driven Architecture demos
 
+![Serverless EDA Demo Architecture](images/eda-diagram.png "Serverless EDA Demo")
+
 Common technology:
 - Python3.9
 - Serverless Framework
