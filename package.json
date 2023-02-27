@@ -10,7 +10,7 @@
   },
   "author": "",
   "license": "ISC",
-  "dependencies": {
+  "devDependencies": {
     "serverless-python-requirements": "^5.4.0",
     "serverless-step-functions": "^3.10.0"
   }

@@ -1,11 +1,11 @@
 service: eda-demo
 
-frameworkVersion: '3'
+frameworkVersion: "3"
 
 package:
   individually: true
   patterns:
-    - '!**/**'
+    - "!**/**"
 
 provider:
   name: aws
@@ -24,41 +24,33 @@ provider:
         - Effect: Allow
           Action:
             - s3:GetObject
-          Resource: !Join ["/" ,[ !GetAtt inputFileBucket.Arn,"*" ]]
+          Resource: !Join ["/", [!GetAtt InputBucket.Arn, "*"]]
         - Effect: Allow
           Action:
             - s3:PutObject
-          Resource: !Join ["/" ,[ !GetAtt outputFileBucket.Arn,"*" ]]
+          Resource: !Join ["/", [!GetAtt OutputBucket.Arn, "*"]]
         - Effect: Allow
           Action:
             - states:StartExecution
-          Resource: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${self:provider.stage}
+          Resource: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:custom.StateMachine}
+
+custom:
+  StateMachine: ${self:service}-${self:provider.stage}
 
 plugins:
   - serverless-step-functions
   - serverless-python-requirements
 
 functions:
-  file-upload:
-    handler: src/file_upload.handler
+  lambdaCollector:
+    name: ${self:service}-collector-${self:provider.stage}
+    handler: src/collector.handler
     package:
       patterns:
-        - src/file_upload.py
-    events:
-      - eventBridge: 
-          pattern:
-            source:
-              - aws.s3
-            detail-type:
-              - Object Created
-            detail:
-              bucket:
-                name:
-                  - !Ref inputFileBucket
-    environment:
-      STATE_MACHINE: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${self:provider.stage}
+        - src/collector.py
 
-  processor:
+  lambdaProcessor:
+    name: ${self:service}-processor-${self:provider.stage}
     handler: src/processor.handler
     package:
       patterns:
@@ -66,24 +58,29 @@ functions:
     environment:
       API_KEY: ${ssm:/eda-demo/positionstack-key}
 
-  merger:
+  lambdaMerger:
+    name: ${self:service}-merger-${self:provider.stage}
     handler: src/merger.handler
     package:
       patterns:
         - src/merger.py
     environment:
-      OUTPUT_BUCKET: !Ref outputFileBucket
+      OUTPUT_BUCKET: !Ref OutputBucket
 
 stepFunctions:
   stateMachines:
     slsStep:
-      name: ${self:service}-${self:provider.stage}
+      name: ${self:custom.StateMachine}
       tracingConfig:
         enabled: true
       definition:
         Comment: "Serverless Step Function example for S3 file processing"
-        StartAt: iterator
+        StartAt: collector
         States:
+          collector:
+            Type: Task
+            Resource: !GetAtt lambdaCollector.Arn
+            Next: iterator
           iterator:
             Type: Map
             ItemsPath: "$.payload"
@@ -93,27 +90,102 @@ stepFunctions:
               States:
                 processor:
                   Type: Task
-                  Resource: "arn:aws:lambda:${aws:region}:${aws:accountId}:function:${self:service}-${self:provider.stage}-processor"
+                  Resource: !GetAtt lambdaProcessor.Arn
                   End: true
             Next: merger
           merger:
             Type: Task
-            Resource: "arn:aws:lambda:${aws:region}:${aws:accountId}:function:${self:service}-${self:provider.stage}-merger"
+            Resource: !GetAtt lambdaMerger.Arn
             End: true
 
 resources:
   Resources:
-    inputFileBucket:
+    InputBucket:
       Type: AWS::S3::Bucket
       Properties:
-        BucketName: ${self:service}-input-${self:provider.stage}
+        BucketName: ${aws:accountId}-${self:service}-input-${self:provider.stage}
         AccessControl: Private
         NotificationConfiguration:
-          EventBridgeConfiguration:
-            EventBridgeEnabled: true
+          QueueConfigurations:
+            - Event: s3:ObjectCreated:*
+              Queue: !GetAtt S3EventQ.Arn
 
-    outputFileBucket:
+    OutputBucket:
       Type: AWS::S3::Bucket
       Properties:
-        BucketName: ${self:service}-output-${self:provider.stage}
+        BucketName: ${aws:accountId}-${self:service}-output-${self:provider.stage}
         AccessControl: Private
+
+    S3EventQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-s3event-${self:provider.stage}
+
+    SQSS3EventPolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: s3.amazonaws.com
+              Action: SQS:SendMessage
+              Resource: !GetAtt S3EventQ.Arn
+              Condition:
+                ArnLike:
+                  aws:SourceArn: !GetAtt InputBucket.Arn
+        Queues:
+          - !Ref S3EventQ
+
+    SQSStepFunctionPolicy:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - pipes.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Policies:
+          - PolicyName: SQSReadMessage
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - sqs:ReceiveMessage
+                    - sqs:DeleteMessage
+                    - sqs:GetQueueAttributes
+                  Resource: !GetAtt S3EventQ.Arn
+          - PolicyName: StepFunctionStart
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - states:StartExecution
+                  Resource: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:custom.StateMachine}
+
+    SQSStepFunctionPipe:
+      Type: AWS::Pipes::Pipe
+      Properties:
+        Name: SQS-to-StepFunction-Pipe
+        DesiredState: RUNNING
+        RoleArn: !GetAtt SQSStepFunctionPolicy.Arn
+        Source: !GetAtt S3EventQ.Arn
+        SourceParameters:
+          SqsQueueParameters:
+            BatchSize: 1
+        Target: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:custom.StateMachine}
+        TargetParameters:
+          StepFunctionStateMachineParameters:
+            InvocationType: FIRE_AND_FORGET
+          # InputTemplate: |
+          #   {
+          #     "bucket": <$.body.Records[0].s3.bucket.name>,
+          #     "key":<$.body.Records[0].s3.object.key>
+          #   }
