@@ -17,14 +17,18 @@ provider:
     blockPublicAccess: true
   tracing:
     lambda: true
-  stage: ${opt:stage,'dev'}
+  stage: ${env:USER}
   iam:
     role:
       statements:
         - Effect: Allow
           Action:
             - s3:GetObject
-          Resource: !Join ["/", [!GetAtt InputBucket.Arn, "*"]]
+          Resource: !Join ["/", [!GetAtt SQSInputBucket.Arn, "*"]]
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+          Resource: !Join ["/", [!GetAtt EventBridgeInputBucket.Arn, "*"]]
         - Effect: Allow
           Action:
             - s3:PutObject
@@ -36,6 +40,7 @@ provider:
 
 custom:
   StateMachine: ${self:service}-${self:provider.stage}
+  SQSInputBucket: ${self:service}-sqs-input-${self:provider.stage}
 
 plugins:
   - serverless-step-functions
@@ -100,21 +105,27 @@ stepFunctions:
 
 resources:
   Resources:
-    InputBucket:
+    # Common components
+
+    OutputBucket:
       Type: AWS::S3::Bucket
       Properties:
-        BucketName: ${aws:accountId}-${self:service}-input-${self:provider.stage}
+        BucketName: ${self:service}-output-${self:provider.stage}
+        AccessControl: Private
+
+    # S3 Event -> SQS -> AWS Pipes -> Step Function flow components
+
+    SQSInputBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.SQSInputBucket}
         AccessControl: Private
         NotificationConfiguration:
           QueueConfigurations:
             - Event: s3:ObjectCreated:*
               Queue: !GetAtt S3EventQ.Arn
-
-    OutputBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${aws:accountId}-${self:service}-output-${self:provider.stage}
-        AccessControl: Private
+      DependsOn:
+        - SQSS3EventPolicy
 
     S3EventQ:
       Type: AWS::SQS::Queue
@@ -134,7 +145,7 @@ resources:
               Resource: !GetAtt S3EventQ.Arn
               Condition:
                 ArnLike:
-                  aws:SourceArn: !GetAtt InputBucket.Arn
+                  aws:SourceArn: arn:aws:s3:::${self:custom.SQSInputBucket} # use this rather than GetAtt to avoid circular reference
         Queues:
           - !Ref S3EventQ
 
@@ -184,8 +195,55 @@ resources:
         TargetParameters:
           StepFunctionStateMachineParameters:
             InvocationType: FIRE_AND_FORGET
-          # InputTemplate: |
-          #   {
-          #     "bucket": <$.body.Records[0].s3.bucket.name>,
-          #     "key":<$.body.Records[0].s3.object.key>
-          #   }
+
+    # S3 Event -> EventBridge Rule -> Step Function flow components
+
+    EventBridgeInputBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-eventbridge-input-${self:provider.stage}
+        AccessControl: Private
+        NotificationConfiguration:
+          EventBridgeConfiguration:
+            EventBridgeEnabled: true
+
+    EventBridgeStepFunctionPolicy:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - events.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Policies:
+          - PolicyName: StepFunctionStart
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - states:StartExecution
+                  Resource: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:custom.StateMachine}
+
+    S3InputBucketEventBridgeRule:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: ${self:service}-s3-input-bucket-rule-${self:provider.stage}
+        State: ENABLED
+        EventPattern:
+          source:
+            - aws.s3
+          detail-type:
+            - Object Created
+          detail:
+            bucket:
+              name:
+                - !Ref EventBridgeInputBucket
+        Targets:
+          - Arn: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:custom.StateMachine}
+            RoleArn: !GetAtt EventBridgeStepFunctionPolicy.Arn
+            Id: "StepFunction"

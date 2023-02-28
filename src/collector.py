@@ -10,13 +10,33 @@ logger.setLevel(logging.INFO)
 def handler(event, context):
     logger.info(event)
 
-    # Retrieve data from S3 via EventBridge Pipes notification
-    # Logically it should be possible to transform the message passed into the
-    # statemachine to remove some of the processing in this Lambda.
+    bucket = ""
+    key = ""
 
-    body = json.loads(event[0]['body'])
-    bucket = body['Records'][0]['s3']['bucket']['name']
-    key = body['Records'][0]['s3']['object']['key']
+    # If event originates from SQS + AWS Pipes
+
+    if isinstance(event, list):
+        if "Records" in event:
+            body = json.loads(event[0]['body'])
+            bucket = body['Records'][0]['s3']['bucket']['name']
+            key = body['Records'][0]['s3']['object']['key']
+
+        else:
+            raise Exception("Invalid input message, expecting SQS array")
+
+    # If event originates from EventBridge
+
+    elif set(["source", "detail-type", "detail"]).issubset(event):
+        if event["source"] == 'aws.s3' and event['detail-type'] == 'Object Created':
+            bucket = event['detail']['bucket']['name']
+            key = event['detail']['object']['key']
+        else:
+            raise Exception(
+                "Invalid input message, expecting S3 EventBridge event")
+
+    else:
+        raise Exception(
+            "Invalid input message, expecting SQS array or EventBridge structure")
 
     s3 = boto3.client('s3')
     data = s3.get_object(Bucket=bucket, Key=key)

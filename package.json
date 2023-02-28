@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "create": "npm install --legacy-peer-deps && sls deploy",
-    "destroy": "aws s3 rm  s3://eda-demo-input-dev --recursive && aws s3 rm  s3://eda-demo-output-dev --recursive && sls remove",
+    "destroy": "aws s3 rm  s3://eda-demo-sqs-input-${USER} --recursive && aws s3 rm  s3://eda-demo-eventbridge-input-${USER} --recursive && aws s3 rm  s3://eda-demo-output-${USER} --recursive && sls remove",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
